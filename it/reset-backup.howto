@@ -1,1 +1,1 @@
-rm -rf backup/*; cp -r backup_seed/* backup
+rm -rf backup; cp -r backup_seed backup
