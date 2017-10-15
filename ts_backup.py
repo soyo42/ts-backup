@@ -95,10 +95,9 @@ if __name__ == '__main__':
         sys.stderr.write('#args: {0}\n'.format(args))
 
     source_path = os.path.abspath(args.source)
-    project_folder = os.path.basename(source_path)
-    target_path = os.path.join(os.path.abspath(args.backup_root), project_folder)
+    target_path = os.path.abspath(args.backup_root)
     if args.verbose:
-        sys.stderr.write('#project folder: {0}\n'.format(project_folder))
+        sys.stderr.write('#source_path: {0}\n'.format(source_path))
         sys.stderr.write('#target_path: {0}\n'.format(target_path))
 
     check_and_create_folder(target_path, dry_run=args.dry_run)
