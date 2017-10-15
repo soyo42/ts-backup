@@ -7,6 +7,7 @@ import sys
 import os
 from filecmp import dircmp
 import itertools
+import shutil
 
 
 class BackupShallowDiff:
@@ -16,12 +17,37 @@ class BackupShallowDiff:
 
     def __init__(self, source_folder, target_folder):
         self._diff = dircmp(source_folder, target_folder)
-        self._diff.report_full_closure()
-        for subdir, subdiff in self._diff.subdirs.items():
-            print('subdir: {0} -> {1}'.format(subdir, subdiff))
+        # self._diff.report_full_closure()
+        # for subdir, subdiff in self._diff.subdirs.items():
+        #     print('subdir: {0} -> {1}'.format(subdir, subdiff))
 
-    def get_updates(self):
-        return itertools.chain(self._diff.left_only, self._diff.diff_files)
+    def collect_updates(self):
+        all_diff_files = []
+        diff_stack = [self._diff]
+        while diff_stack:
+            diff_cursor = diff_stack.pop()
+            file_chain = itertools.chain(diff_cursor.left_only, diff_cursor.diff_files)
+            all_diff_files.append(map(ParentPairJoiner(diff_cursor.left, diff_cursor.right).join, file_chain))
+            if diff_cursor.subdirs:
+                diff_stack.extend(diff_cursor.subdirs.values())
+        return itertools.chain(*all_diff_files)
+
+
+class ParentPairJoiner:
+    """
+    Provide path joining suitable for lazy operations.
+    """
+
+    def __init__(self, parent_left_path, parent_right_path):
+        self._parent_left_path = parent_left_path
+        self._parent_right_path = parent_right_path
+
+    def join(self, child_path):
+        """
+        :param child_path: child file or folder name
+        :return: tuple with child_path joined to left and right parent
+        """
+        return os.path.join(self._parent_left_path, child_path), os.path.join(self._parent_right_path, child_path)
 
 
 def check_and_create_folder(target: str, dry_run=False):
@@ -39,6 +65,18 @@ def check_and_create_folder(target: str, dry_run=False):
             os.mkdir(target_path)
 
 
+def do_copy(file_source, file_target):
+    """
+    Copy file or folder from source to target
+    :param file_source: source file or folder
+    :param file_target: target file or folder
+    """
+    if os.path.isdir(file_source):
+        shutil.copytree(file_source, file_target)
+    else:
+        shutil.copy2(file_source, file_target)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='One-shot backup of projects using shallow file compare.')
     parser.add_argument('--source', type=str, required=True,
@@ -54,21 +92,22 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.verbose:
-        sys.stderr.write('args: {0}\n'.format(args))
+        sys.stderr.write('#args: {0}\n'.format(args))
 
     source_path = os.path.abspath(args.source)
     project_folder = os.path.basename(source_path)
     target_path = os.path.join(os.path.abspath(args.backup_root), project_folder)
     if args.verbose:
-        sys.stderr.write('project folder: {0}\n'.format(project_folder))
-        sys.stderr.write('target_path: {0}\n'.format(target_path))
+        sys.stderr.write('#project folder: {0}\n'.format(project_folder))
+        sys.stderr.write('#target_path: {0}\n'.format(target_path))
 
     check_and_create_folder(target_path, dry_run=args.dry_run)
 
     diff = BackupShallowDiff(source_path, target_path)
-    for file in diff.get_updates():
+    for file_left, file_right in diff.collect_updates():
         if args.dry_run:
-            print('backup [tbd]: {0}'.format(os.path.join(args.source, file)))
+            print('backup [dry-run]: {0}\n               -> {1}'.format(file_left, file_right))
         else:
-            pass
+            print('backup: {0}\n     -> {1}'.format(file_left, file_right))
+            do_copy(file_left, file_right)
 
