@@ -8,6 +8,7 @@ import os
 from filecmp import dircmp
 import itertools
 import shutil
+from datetime import datetime
 
 
 class BackupShallowDiff:
@@ -90,6 +91,8 @@ if __name__ == '__main__':
 
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
+    DATE_TIME_FORM = '%Y-%m-%dT%H:%M:%S'
+    print(' {0} '.format(datetime.strftime(datetime.now(), DATE_TIME_FORM)).center(35, 'v'))
 
     if args.verbose:
         sys.stderr.write('#args: {0}\n'.format(args))
@@ -110,3 +113,4 @@ if __name__ == '__main__':
             print('backup: {0}\n     -> {1}'.format(file_left, file_right))
             do_copy(file_left, file_right)
 
+    print(' {0} '.format(datetime.strftime(datetime.now(), DATE_TIME_FORM)).center(35, '^'))
