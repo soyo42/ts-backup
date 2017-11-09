@@ -14,6 +14,7 @@ import itertools
 import shutil
 from datetime import datetime
 import traceback
+from functools import wraps
 import argcomplete
 
 
@@ -104,9 +105,44 @@ def check_and_create_folder(target: str, dry_run=False):
             os.mkdir(_TARGET_PATH)
 
 
+def safe_action(message):
+    """
+    Expose message value to inner decorator
+
+    :param message: message seed in case of exception
+    :return: try-except-log decorator
+    """
+    def decorator(func):
+        """
+        Wraps risky method into wrapper
+
+        :param func: original callable
+        :return: try-except-log wrapper
+        """
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            """
+            Surround func with try-except-log blocks
+
+            :param args:
+            :param kwargs:
+            :return: wrapped callable
+            """
+            try:
+                func(*args, **kwargs)
+            except Exception:
+                print('! [{0}] '.format(func.__name__) + message.format(*args))
+                print(traceback.format_exc())
+
+        return wrapper
+    return decorator
+
+
+@safe_action('failed to copy {0} -> {1}')
 def do_copy(file_source, file_target):
     """
     Copy file or folder from source to target
+
     :param file_source: source file or folder
     :param file_target: target file or folder
     """
@@ -116,29 +152,17 @@ def do_copy(file_source, file_target):
         shutil.copy2(file_source, file_target)
 
 
+@safe_action('failed to remove {0}')
 def do_remove(file_target):
     """
     Remove file or folder (recursively)
+
     :param file_target: source file or folder
     """
     if os.path.isdir(file_target):
         shutil.rmtree(file_target)
     else:
         os.remove(file_target)
-
-
-def safe_wrapper(action_callable, message, *action_input):
-    """
-    Wraps risky method into try-except block
-    :param action_callable: risky action
-    :param message: message seed in case of exception
-    :param action_input: input parameters for action callable and message
-    """
-    try:
-        action_callable(*action_input)
-    except Exception:
-        print('! ' + message.format(*action_input))
-        print(traceback.format_exc())
 
 
 if __name__ == '__main__':
@@ -175,13 +199,13 @@ if __name__ == '__main__':
             print('backup [dry-run]: {0}\n               -> {1}'.format(file_left, file_right))
         else:
             print('backup: {0}\n     -> {1}'.format(file_left, file_right))
-            safe_wrapper(do_copy, 'failed to copy {0} -> {1}', file_left, file_right)
+            do_copy(file_left, file_right)
     # remove
     for doomed_file_right in _DIFF.collect_removals():
         if _ARGS.dry_run:
             print('REMOVE [dry-run]: {0}'.format(doomed_file_right))
         else:
             print('REMOVE: {0}'.format(doomed_file_right))
-            safe_wrapper(do_remove, 'failed to remove {0}', doomed_file_right)
+            do_remove(doomed_file_right)
 
     print(' {0} '.format(datetime.strftime(datetime.now(), _DATE_TIME_FORM)).center(35, '^'))
