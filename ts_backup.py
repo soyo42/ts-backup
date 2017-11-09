@@ -9,6 +9,7 @@ from filecmp import dircmp
 import itertools
 import shutil
 from datetime import datetime
+import traceback
 
 
 class BackupShallowDiff:
@@ -33,22 +34,47 @@ class BackupShallowDiff:
                 diff_stack.extend(diff_cursor.subdirs.values())
         return itertools.chain(*all_diff_files)
 
+    def collect_removals(self):
+        all_removed_files = []
+        diff_stack = [self._diff]
+        while diff_stack:
+            diff_cursor = diff_stack.pop()
+            all_removed_files.append(map(ParentJoiner(diff_cursor.right).join, diff_cursor.right_only))
+            if diff_cursor.subdirs:
+                diff_stack.extend(diff_cursor.subdirs.values())
+        return itertools.chain(*all_removed_files)
 
-class ParentPairJoiner:
-    """
-    Provide path joining suitable for lazy operations.
-    """
 
-    def __init__(self, parent_left_path, parent_right_path):
-        self._parent_left_path = parent_left_path
-        self._parent_right_path = parent_right_path
+class ParentJoiner:
+    """
+    Provide path + child joining - suitable for lazy operations.
+    """
+    def __init__(self, parent_path):
+        self._parent_path = parent_path
 
     def join(self, child_path):
         """
         :param child_path: child file or folder name
-        :return: tuple with child_path joined to left and right parent
+        :return: parent path joined with child (plain file or folder name)
         """
-        return os.path.join(self._parent_left_path, child_path), os.path.join(self._parent_right_path, child_path)
+        return os.path.join(self._parent_path, child_path)
+
+
+class ParentPairJoiner:
+    """
+    Provide path +child joining in pairs (source, target) - suitable for lazy operations.
+    """
+
+    def __init__(self, parent_left_path, parent_right_path):
+        self._parent_left_path_joiner = ParentJoiner(parent_left_path)
+        self._parent_right_path_joiner = ParentJoiner(parent_right_path)
+
+    def join(self, child_path):
+        """
+        :param child_path: child file or folder name
+        :return: tuple with (left, right) parent path joined with child (plain file or folder name)
+        """
+        return self._parent_left_path_joiner.join(child_path), self._parent_right_path_joiner.join(child_path)
 
 
 def check_and_create_folder(target: str, dry_run=False):
@@ -76,6 +102,25 @@ def do_copy(file_source, file_target):
         shutil.copytree(file_source, file_target)
     else:
         shutil.copy2(file_source, file_target)
+
+
+def do_remove(file_target):
+    """
+    Remove file or folder (recursively)
+    :param file_target: source file or folder
+    """
+    if os.path.isdir(file_target):
+        shutil.rmtree(file_target)
+    else:
+        os.remove(file_target)
+
+
+def safe_wrapper(action_callable, message, *args):
+    try:
+        action_callable(*args)
+    except Exception as e:
+        print('! '+message.format(*args))
+        print(traceback.format_exc())
 
 
 if __name__ == '__main__':
@@ -106,11 +151,19 @@ if __name__ == '__main__':
     check_and_create_folder(target_path, dry_run=args.dry_run)
 
     diff = BackupShallowDiff(source_path, target_path)
+    # copy+update
     for file_left, file_right in diff.collect_updates():
         if args.dry_run:
             print('backup [dry-run]: {0}\n               -> {1}'.format(file_left, file_right))
         else:
             print('backup: {0}\n     -> {1}'.format(file_left, file_right))
-            do_copy(file_left, file_right)
+            safe_wrapper(do_copy, 'failed to copy {0} -> {1}', file_left, file_right)
+    # remove
+    for doomed_file_right in diff.collect_removals():
+        if args.dry_run:
+            print('REMOVE [dry-run]: {0}'.format(doomed_file_right))
+        else:
+            print('REMOVE: {0}'.format(doomed_file_right))
+            safe_wrapper(do_remove, 'failed to remove {0}', doomed_file_right)
 
     print(' {0} '.format(datetime.strftime(datetime.now(), DATE_TIME_FORM)).center(35, '^'))
