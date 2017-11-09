@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # PYTHON_ARGCOMPLETE_OK
+"""
+Simple backup script based on position, timestamp and size comparison. Backup folder is effectively synchronized
+with source folder. New and updated files are copied to backup and deleted files or folders are removed from
+backup as well.
+"""
 
-import argcomplete
 import argparse
 import sys
 import os
@@ -10,6 +14,7 @@ import itertools
 import shutil
 from datetime import datetime
 import traceback
+import argcomplete
 
 
 class BackupShallowDiff:
@@ -24,6 +29,9 @@ class BackupShallowDiff:
         #     print('subdir: {0} -> {1}'.format(subdir, subdiff))
 
     def collect_updates(self):
+        """
+        :return: lazy iterable of tuples containing full source and target paths of changed files or folders
+        """
         all_diff_files = []
         diff_stack = [self._diff]
         while diff_stack:
@@ -35,6 +43,9 @@ class BackupShallowDiff:
         return itertools.chain(*all_diff_files)
 
     def collect_removals(self):
+        """
+        :return: lazy iterable of files or folders to be removed (right side means backup side)
+        """
         all_removed_files = []
         diff_stack = [self._diff]
         while diff_stack:
@@ -49,6 +60,7 @@ class ParentJoiner:
     """
     Provide path + child joining - suitable for lazy operations.
     """
+
     def __init__(self, parent_path):
         self._parent_path = parent_path
 
@@ -86,10 +98,10 @@ def check_and_create_folder(target: str, dry_run=False):
     """
     if not os.path.isdir(target):
         if dry_run:
-            sys.stderr.write('.. need to create target folder\n'.format(target_path))
+            sys.stderr.write('.. need to create target folder: {0}\n'.format(_TARGET_PATH))
         else:
-            sys.stderr.write('.. creating target folder: {0}\n'.format(target_path))
-            os.mkdir(target_path)
+            sys.stderr.write('.. creating target folder: {0}\n'.format(_TARGET_PATH))
+            os.mkdir(_TARGET_PATH)
 
 
 def do_copy(file_source, file_target):
@@ -115,55 +127,61 @@ def do_remove(file_target):
         os.remove(file_target)
 
 
-def safe_wrapper(action_callable, message, *args):
+def safe_wrapper(action_callable, message, *action_input):
+    """
+    Wraps risky method into try-except block
+    :param action_callable: risky action
+    :param message: message seed in case of exception
+    :param action_input: input parameters for action callable and message
+    """
     try:
-        action_callable(*args)
-    except Exception as e:
-        print('! '+message.format(*args))
+        action_callable(*action_input)
+    except Exception:
+        print('! ' + message.format(*action_input))
         print(traceback.format_exc())
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='One-shot backup of projects using shallow file compare.')
-    parser.add_argument('--source', type=str, required=True,
-                        help='source folder (with living data inside)')
-    parser.add_argument('--backup-root', type=str, required=True,
-                        help='target folder (with backups)')
-    parser.add_argument('--dry-run', action='store_true',
-                        help='just show what would be copied - no change on file system')
-    parser.add_argument('--verbose', action='store_true',
-                        help='show verbose output')
+    _PARSER = argparse.ArgumentParser(description='One-shot backup of projects using shallow file compare.')
+    _PARSER.add_argument('--source', type=str, required=True,
+                         help='source folder (with living data inside)')
+    _PARSER.add_argument('--backup-root', type=str, required=True,
+                         help='target folder (with backups)')
+    _PARSER.add_argument('--dry-run', action='store_true',
+                         help='just show what would be copied - no change on file system')
+    _PARSER.add_argument('--verbose', action='store_true',
+                         help='show verbose output')
 
-    argcomplete.autocomplete(parser)
-    args = parser.parse_args()
-    DATE_TIME_FORM = '%Y-%m-%dT%H:%M:%S'
-    print(' {0} '.format(datetime.strftime(datetime.now(), DATE_TIME_FORM)).center(35, 'v'))
+    argcomplete.autocomplete(_PARSER)
+    _ARGS = _PARSER.parse_args()
+    _DATE_TIME_FORM = '%Y-%m-%dT%H:%M:%S'
+    print(' {0} '.format(datetime.strftime(datetime.now(), _DATE_TIME_FORM)).center(35, 'v'))
 
-    if args.verbose:
-        sys.stderr.write('#args: {0}\n'.format(args))
+    if _ARGS.verbose:
+        sys.stderr.write('#args: {0}\n'.format(_ARGS))
 
-    source_path = os.path.abspath(args.source)
-    target_path = os.path.abspath(args.backup_root)
-    if args.verbose:
-        sys.stderr.write('#source_path: {0}\n'.format(source_path))
-        sys.stderr.write('#target_path: {0}\n'.format(target_path))
+    _SOURCE_PATH = os.path.abspath(_ARGS.source)
+    _TARGET_PATH = os.path.abspath(_ARGS.backup_root)
+    if _ARGS.verbose:
+        sys.stderr.write('#source_path: {0}\n'.format(_SOURCE_PATH))
+        sys.stderr.write('#target_path: {0}\n'.format(_TARGET_PATH))
 
-    check_and_create_folder(target_path, dry_run=args.dry_run)
+    check_and_create_folder(_TARGET_PATH, dry_run=_ARGS.dry_run)
 
-    diff = BackupShallowDiff(source_path, target_path)
+    _DIFF = BackupShallowDiff(_SOURCE_PATH, _TARGET_PATH)
     # copy+update
-    for file_left, file_right in diff.collect_updates():
-        if args.dry_run:
+    for file_left, file_right in _DIFF.collect_updates():
+        if _ARGS.dry_run:
             print('backup [dry-run]: {0}\n               -> {1}'.format(file_left, file_right))
         else:
             print('backup: {0}\n     -> {1}'.format(file_left, file_right))
             safe_wrapper(do_copy, 'failed to copy {0} -> {1}', file_left, file_right)
     # remove
-    for doomed_file_right in diff.collect_removals():
-        if args.dry_run:
+    for doomed_file_right in _DIFF.collect_removals():
+        if _ARGS.dry_run:
             print('REMOVE [dry-run]: {0}'.format(doomed_file_right))
         else:
             print('REMOVE: {0}'.format(doomed_file_right))
             safe_wrapper(do_remove, 'failed to remove {0}', doomed_file_right)
 
-    print(' {0} '.format(datetime.strftime(datetime.now(), DATE_TIME_FORM)).center(35, '^'))
+    print(' {0} '.format(datetime.strftime(datetime.now(), _DATE_TIME_FORM)).center(35, '^'))
