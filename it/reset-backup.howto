@@ -1,1 +1,2 @@
 rm -rf backup; cp -r backup_seed backup
+touch -r projects/prj1/f1 backup/prj1/f1

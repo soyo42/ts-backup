@@ -15,7 +15,108 @@ import shutil
 from datetime import datetime
 import traceback
 from functools import wraps
+import stat
 import argcomplete
+
+
+class DirCmpShallowOnly(dircmp):
+    """
+    Compare directories but involve shallow compare only - NEVER read content.
+    """
+
+    def __init__(self, a, b, ignore=None, hide=None):
+        super().__init__(a, b, ignore, hide)
+        self.methodmap.update(dict(
+            subdirs=DirCmpShallowOnly.phase4,
+            same_files=DirCmpShallowOnly.phase3, diff_files=DirCmpShallowOnly.phase3, funny_files=DirCmpShallowOnly.phase3,
+        ))
+
+    def phase3(self):  # override
+        # Find out differences between common files
+
+        # print('phase3: {0} vs. {1}'.format(self.left, self.right))
+        composite_cmp_result = DirCmpShallowOnly.cmpfiles(self.left, self.right, self.common_files)
+        self.same_files, self.diff_files, self.funny_files = composite_cmp_result
+
+    def phase4(self):  # override
+        # Find out differences between common subdirectories
+        # A new dircmp object is created for each common subdirectory,
+        # these are stored in a dictionary indexed by filename.
+        # The hide and ignore properties are inherited from the parent
+
+        self.subdirs = {}
+        for common_dir in self.common_dirs:
+            a_x = os.path.join(self.left, common_dir)
+            b_x = os.path.join(self.right, common_dir)
+            self.subdirs[common_dir] = DirCmpShallowOnly(a_x, b_x, self.ignore, self.hide)
+
+    @staticmethod
+    def cmpfiles(dir_a, dir_b, common_files):
+        """
+        Compare common files in two directories.
+
+        a, b -- directory names
+        common -- list of file names found in both directories
+        shallow -- if true, do comparison based solely on stat() information
+
+        Returns a tuple of three lists:
+          files that compare equal
+          files that are different
+          filenames that aren't regular files.
+        """
+        res = ([], [], [])
+        for common_file in common_files:
+            file_a = os.path.join(dir_a, common_file)
+            file_b = os.path.join(dir_b, common_file)
+            cmp_result = DirCmpShallowOnly._cmp(file_a, file_b)
+            # print('cmpfiles: {1}:{0} vs. {2}:{0} --> {3}\n'.format(common_file, a, b, abs(cmp_result)))
+            res[cmp_result].append(common_file)
+        # print(res)
+        return res
+
+    @staticmethod
+    def _cmp(file_a, file_b):
+        try:
+            return not abs(DirCmpShallowOnly.cmp(file_a, file_b))
+        except OSError:
+            return 2
+
+    @staticmethod
+    def cmp(file_a, file_b):
+        """Compare two files.
+
+        Arguments:
+
+        f1 -- First file name
+
+        f2 -- Second file name
+
+        shallow -- Just check stat signature (do not read the files).
+                   defaults to True.
+
+        Return value:
+
+        True if the files are the same (based on shallow compare), False otherwise.
+        """
+
+        signature_a = DirCmpShallowOnly._sig(os.stat(file_a))
+        signature_b = DirCmpShallowOnly._sig(os.stat(file_b))
+        outcome = False
+        if signature_a[0] != stat.S_IFREG or signature_b[0] != stat.S_IFREG:
+            outcome = False
+        if signature_a == signature_b:
+            outcome = True
+
+        # print('#cmp {0}: {1}'.format(f1, signature_a))
+        # print('#cmp {0}: {1}'.format(f2, signature_b))
+
+        return outcome
+
+    @staticmethod
+    def _sig(full_stat):
+        return (stat.S_IFMT(full_stat.st_mode),
+                full_stat.st_size,
+                full_stat.st_mtime)
 
 
 class BackupShallowDiff:
@@ -24,7 +125,7 @@ class BackupShallowDiff:
     """
 
     def __init__(self, source_folder, target_folder):
-        self._diff = dircmp(source_folder, target_folder)
+        self._diff = DirCmpShallowOnly(source_folder, target_folder)
         # self._diff.report_full_closure()
         # for subdir, subdiff in self._diff.subdirs.items():
         #     print('subdir: {0} -> {1}'.format(subdir, subdiff))
