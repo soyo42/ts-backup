@@ -7,28 +7,35 @@ backup as well.
 """
 
 import argparse
-import sys
 import os
 from filecmp import dircmp
 import itertools
 import shutil
 from datetime import datetime
 import traceback
-from functools import wraps
+from functools import wraps, reduce
 import stat
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures._base import TimeoutError as FutureTimeoutError
+import threading
+from queue import Queue
+from typing import Iterator, List, NamedTuple
+import logging
 import argcomplete
 
 
 class DirCmpShallowOnly(dircmp):
     """
-    Compare directories but involve shallow compare only - NEVER read content.
+    Compare directories but involve shallow compare only - NEVER read content in order to compare.
     """
 
     def __init__(self, a, b, ignore=None, hide=None):
         super().__init__(a, b, ignore, hide)
         self.methodmap.update(dict(
             subdirs=DirCmpShallowOnly.phase4,
-            same_files=DirCmpShallowOnly.phase3, diff_files=DirCmpShallowOnly.phase3, funny_files=DirCmpShallowOnly.phase3,
+            same_files=DirCmpShallowOnly.phase3,
+            diff_files=DirCmpShallowOnly.phase3,
+            funny_files=DirCmpShallowOnly.phase3,
         ))
 
     def phase3(self):  # override
@@ -124,8 +131,18 @@ class BackupShallowDiff:
     Compare recursively source anf target folders and detect what got updated.
     """
 
-    def __init__(self, source_folder, target_folder):
-        self._diff = DirCmpShallowOnly(source_folder, target_folder)
+    # this type hinting is supported by python-3.6+
+    TaskContext = NamedTuple('TaskContext', [
+        ('all_diff_files', List[Iterator]),
+        ('pool', ThreadPoolExecutor),
+        ('pool_lock', threading.Lock),
+        ('async_result_lot', Queue)
+    ])
+
+    def __init__(self, source_folder: str, target_folder: str):
+        self._root_diff = DirCmpShallowOnly(source_folder, target_folder)
+        self.pool = ThreadPoolExecutor(10)
+        self.pool_lock = threading.Lock()
         # self._diff.report_full_closure()
         # for subdir, subdiff in self._diff.subdirs.items():
         #     print('subdir: {0} -> {1}'.format(subdir, subdiff))
@@ -135,21 +152,57 @@ class BackupShallowDiff:
         :return: lazy iterable of tuples containing full source and target paths of changed files or folders
         """
         all_diff_files = []
-        diff_stack = [self._diff]
-        while diff_stack:
-            diff_cursor = diff_stack.pop()
-            file_chain = itertools.chain(diff_cursor.left_only, diff_cursor.diff_files)
-            all_diff_files.append(map(ParentPairJoiner(diff_cursor.left, diff_cursor.right).join, file_chain))
-            if diff_cursor.subdirs:
-                diff_stack.extend(diff_cursor.subdirs.values())
+        async_results = Queue()  # type~ Queue[Tuple[str, Future]]
+
+        task_context = BackupShallowDiff.TaskContext(all_diff_files, self.pool, self.pool_lock, async_results)
+        BackupShallowDiff.process_diff(self._root_diff, task_context)
+
+        result_lot = {}
+        while not async_results.empty():
+            path, result = async_results.get()
+            try:
+                result_lot[path] = result.result(30)
+            except FutureTimeoutError:
+                logging.warning('diff task timed out for: %s', path)
+
+        self.pool.shutdown(False)
+        logging.debug('# amount of tasks:   %d', len(result_lot))
+        logging.debug('# amount of subdirs: %d', reduce(lambda x, y: x+y, result_lot.values(), 0))
+
         return itertools.chain(*all_diff_files)
+
+    @staticmethod
+    def process_diff(diff_item: dircmp, task: TaskContext):
+        """
+        Asynchronous task body, purpose: walk through local files and subfolders
+
+        :param diff_item: current cmpdir object
+        :param task: common task context
+        :return: amount of subfolders (fired asynchronous visiting - thread per folder)
+        """
+        logging.debug('PROCESSING diff: %s', diff_item.left)
+        file_chain = itertools.chain(diff_item.left_only, diff_item.diff_files)
+        task.pool_lock.acquire()
+        task.all_diff_files.append(map(ParentPairJoiner(diff_item.left, diff_item.right).join, file_chain))
+        task.pool_lock.release()
+        if diff_item.subdirs:
+            logging.debug('entering subdirs in: %s [%s]', diff_item.left, threading.current_thread())
+            task.pool_lock.acquire()
+            for next_diff_item in diff_item.subdirs.values():
+                logging.debug('entering subdir: %s', next_diff_item.left)
+                result = task.pool.submit(BackupShallowDiff.process_diff, next_diff_item, task)
+                logging.debug('future: %s', result)
+                task.async_result_lot.put((next_diff_item.left, result))
+            task.pool_lock.release()
+            logging.debug('leaving subdirs in: %s .. done', diff_item.left)
+        return len(diff_item.subdirs.values())
 
     def collect_removals(self):
         """
         :return: lazy iterable of files or folders to be removed (right side means backup side)
         """
         all_removed_files = []
-        diff_stack = [self._diff]
+        diff_stack = [self._root_diff]
         while diff_stack:
             diff_cursor = diff_stack.pop()
             all_removed_files.append(map(ParentJoiner(diff_cursor.right).join, diff_cursor.right_only))
@@ -158,7 +211,7 @@ class BackupShallowDiff:
         return itertools.chain(*all_removed_files)
 
 
-class ParentJoiner:
+class ParentJoiner:  # pylint: disable=too-few-public-methods
     """
     Provide path + child joining - suitable for lazy operations.
     """
@@ -174,7 +227,7 @@ class ParentJoiner:
         return os.path.join(self._parent_path, child_path)
 
 
-class ParentPairJoiner:
+class ParentPairJoiner:  # pylint: disable=too-few-public-methods
     """
     Provide path +child joining in pairs (source, target) - suitable for lazy operations.
     """
@@ -200,9 +253,9 @@ def check_and_create_folder(target: str, dry_run=False):
     """
     if not os.path.isdir(target):
         if dry_run:
-            sys.stderr.write('.. need to create target folder: {0}\n'.format(_TARGET_PATH))
+            logging.warning('.. need to create target folder: %s', _TARGET_PATH)
         else:
-            sys.stderr.write('.. creating target folder: {0}\n'.format(_TARGET_PATH))
+            logging.warning('.. creating target folder: %s', _TARGET_PATH)
             os.mkdir(_TARGET_PATH)
 
 
@@ -281,15 +334,19 @@ if __name__ == '__main__':
     _ARGS = _PARSER.parse_args()
     _DATE_TIME_FORM = '%Y-%m-%dT%H:%M:%S'
     print(' {0} '.format(datetime.strftime(datetime.now(), _DATE_TIME_FORM)).center(35, 'v'))
+    if _ARGS.verbose:
+        _LEVEL = logging.DEBUG
+    else:
+        _LEVEL = logging.INFO
+    logging.basicConfig(level=_LEVEL)
 
     if _ARGS.verbose:
-        sys.stderr.write('#args: {0}\n'.format(_ARGS))
+        logging.info('#args: %s', _ARGS)
 
     _SOURCE_PATH = os.path.abspath(_ARGS.source)
     _TARGET_PATH = os.path.abspath(_ARGS.backup_root)
-    if _ARGS.verbose:
-        sys.stderr.write('#source_path: {0}\n'.format(_SOURCE_PATH))
-        sys.stderr.write('#target_path: {0}\n'.format(_TARGET_PATH))
+    logging.info('#source_path: %s', _SOURCE_PATH)
+    logging.info('#target_path: %s', _TARGET_PATH)
 
     check_and_create_folder(_TARGET_PATH, dry_run=_ARGS.dry_run)
 
